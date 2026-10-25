@@ -1,0 +1,24 @@
+{
+  "name": "session-search",
+  "version": "0.1.0",
+  "description": "Local, private semantic search over past Copilot sessions",
+  "type": "module",
+  "license": "MIT",
+  "author": "hokfei",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hokfei/copilot-session-search.git"
+  },
+  "engines": { "node": ">=22.5.0" },
+  "scripts": {
+    "build": "node scripts/build-index.mjs",
+    "test": "node scripts/test-search.mjs",
+    "schedule": "node scripts/schedule-daily.mjs"
+  },
+  "dependencies": {
+    "node-llama-cpp": "^3.22.2"
+  },
+  "allowScripts": {
+    "node-llama-cpp@3.22.2": true
+  }
+}

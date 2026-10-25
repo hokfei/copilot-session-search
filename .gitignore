@@ -1,0 +1,6 @@
+node_modules/
+*.gguf
+index.bin
+index.meta.json
+*.tmp
+last-run.txt
