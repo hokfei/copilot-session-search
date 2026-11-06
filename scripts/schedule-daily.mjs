@@ -8,8 +8,13 @@ const execFileAsync = promisify(execFile);
 async function main() {
   const script = join(extRoot, "scripts", "daily-reindex.mjs");
   if (process.platform === "win32") {
-    const taskName = "SessionSearchDailyReindex";
+    const taskName = "SessionSearchReindex";
     const tr = `"${process.execPath}" "${script}"`;
+    try {
+      await execFileAsync("schtasks", ["/delete", "/tn", "SessionSearchDailyReindex", "/f"]);
+    } catch {
+      // Already gone (first install or previously migrated).
+    }
     await execFileAsync("schtasks", [
       "/create",
       "/tn",
@@ -19,19 +24,19 @@ async function main() {
       "/sc",
       "hourly",
       "/mo",
-      "3",
+      "1",
       "/st",
       "00:00",
       "/f",
     ]);
-    console.log(`scheduled task "${taskName}" created: every 3h -> ${tr}`);
+    console.log(`scheduled task "${taskName}" created: hourly -> ${tr}`);
     console.log("The script also guards with last-run.txt so it never runs twice an hour.");
     console.log("Then apply catch-up settings (needs no admin):");
     console.log(`powershell -Command "Set-ScheduledTask -TaskName '${taskName}' -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2))"`);
   } else {
-    console.log("Add this cron line (daily 03:00):");
-    console.log(`0 3 * * * "${process.execPath}" "${script}"`);
-    console.log("The script also guards with last-run.txt so it never runs twice a day.");
+    console.log("Add this cron line (hourly):");
+    console.log(`0 * * * * "${process.execPath}" "${script}"`);
+    console.log("The script also guards with last-run.txt so it never runs twice an hour.");
   }
 }
 

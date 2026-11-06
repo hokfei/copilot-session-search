@@ -12,23 +12,23 @@ function localStamp(d = new Date()) {
 
 async function main() {
   process.chdir(extRoot);
-  const today = localStamp();
-  if (existsSync(lastRunPath) && readFileSync(lastRunPath, "utf8").trim() === today) {
-    console.log(`already reindexed this hour (${today}), skipping`);
+  const stamp = localStamp();
+  if (existsSync(lastRunPath) && readFileSync(lastRunPath, "utf8").trim() === stamp) {
+    console.log(`already reindexed this hour (${stamp}), skipping`);
     return;
   }
-  console.log(`reindex for ${today}`);
+  console.log(`reindex for ${stamp}`);
   const { stdout } = await execFileAsync(process.execPath, [buildScriptPath], {
     cwd: extRoot,
     timeout: 60 * 60 * 1000,
     maxBuffer: 8 * 1024 * 1024,
   });
   process.stdout.write(stdout);
-  writeFileSync(lastRunPath, today + "\n");
-  console.log(`stamped ${today}`);
+  writeFileSync(lastRunPath, stamp + "\n");
+  console.log(`stamped ${stamp}`);
 }
 
 main().catch((err) => {
-  console.error(`daily reindex failed: ${err.message}`);
+  console.error(`reindex failed: ${err.message}`);
   process.exitCode = 1;
 });

@@ -64,9 +64,9 @@ npm run build
 - Ask the assistant to call `reindex_sessions`, or run `npm run build` here.
 - Indexing is incremental: unchanged chunks reuse their stored vectors, and if
   nothing changed no files are written.
-- For a daily refresh: `npm run schedule` registers an OS scheduled task
+- For an hourly refresh: `npm run schedule` registers an OS scheduled task
   (Windows Task Scheduler, or prints a cron line elsewhere) that runs
-  `scripts/daily-reindex.mjs`. A `last-run.txt` local-date stamp guarantees it
+  `scripts/daily-reindex.mjs`. A `last-run.txt` hour stamp guarantees it
   never runs twice in one hour.
 
 ## Tests
