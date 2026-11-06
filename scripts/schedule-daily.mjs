@@ -17,13 +17,17 @@ async function main() {
       "/tr",
       tr,
       "/sc",
-      "daily",
+      "hourly",
+      "/mo",
+      "3",
       "/st",
-      "03:00",
+      "00:00",
       "/f",
     ]);
-    console.log(`scheduled task "${taskName}" created: daily 03:00 -> ${tr}`);
-    console.log("The script also guards with last-run.txt so it never runs twice a day.");
+    console.log(`scheduled task "${taskName}" created: every 3h -> ${tr}`);
+    console.log("The script also guards with last-run.txt so it never runs twice an hour.");
+    console.log("Then apply catch-up settings (needs no admin):");
+    console.log(`powershell -Command "Set-ScheduledTask -TaskName '${taskName}' -Settings (New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Hours 2))"`);
   } else {
     console.log("Add this cron line (daily 03:00):");
     console.log(`0 3 * * * "${process.execPath}" "${script}"`);

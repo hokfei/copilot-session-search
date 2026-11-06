@@ -67,7 +67,7 @@ npm run build
 - For a daily refresh: `npm run schedule` registers an OS scheduled task
   (Windows Task Scheduler, or prints a cron line elsewhere) that runs
   `scripts/daily-reindex.mjs`. A `last-run.txt` local-date stamp guarantees it
-  never runs twice in one day.
+  never runs twice in one hour.
 
 ## Tests
 
@@ -90,7 +90,7 @@ lib/store.mjs          Float32 bin + JSON meta persistence
 lib/search.mjs         brute-force dot-product search + per-session cap
 scripts/build-index.mjs    incremental index builder
 scripts/test-search.mjs    self-consistency tests
-scripts/daily-reindex.mjs  once-a-day guard + rebuild
+scripts/daily-reindex.mjs  once-an-hour guard + rebuild
 scripts/schedule-daily.mjs OS scheduler registration
 index.bin              vectors (generated, gitignored)
 index.meta.json        chunk metadata (generated, gitignored)
