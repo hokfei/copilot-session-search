@@ -1,5 +1,5 @@
 import { searchVectors } from "../lib/search.mjs";
-import { saveIndex, loadIndex, assertSafeToPublish, modelFileIdentity } from "../lib/store.mjs";
+import { saveIndex, loadIndex, assertSafeToPublish, modelFileIdentity, shouldFullReembed, partialWarningSuffix, formatDoneLine } from "../lib/store.mjs";
 import { readAllDocsWithFailures, readAllDocs } from "../lib/read.mjs";
 import { extRoot, indexBinPath, indexMetaPath } from "../lib/paths.mjs";
 import {
@@ -230,41 +230,144 @@ function restoreEnv(snap) {
   );
 }
 
-// ---------------------------------------------------------------- read shapes (live local sources, shapes only)
+// ---------------------------------------------------------------- R3 pure helpers (shouldFullReembed/partialWarningSuffix/formatDoneLine)
+// Red basis (code-evident): helpers did not exist pre-R3; build-index had inline logic.
 {
-  let res = null;
-  let threw = null;
-  try {
-    res = readAllDocsWithFailures();
-  } catch (err) {
-    threw = err;
-  }
-  check("readAllDocsWithFailures runs without throw", threw === null, threw ? threw.message : "");
-  const docs = res ? res.docs : null;
-  const fails = res ? res.failures : null;
-  check("readAllDocsWithFailures returns docs array", Array.isArray(docs));
-  check("readAllDocsWithFailures returns failures array", Array.isArray(fails));
+  check("shouldFullReembed null oldMeta → false", shouldFullReembed(null, "10:20") === false);
+}
+{
   check(
-    "readAllDocsWithFailures every failure has string source+reason",
-    Array.isArray(fails) && fails.every((f) => typeof f.source === "string" && typeof f.reason === "string"),
-    Array.isArray(fails) ? `failures=${fails.length}` : "no failures array"
-  );
-  check(
-    "readAllDocsWithFailures docs have string sessionId+text",
-    Array.isArray(docs) && docs.every((d) => typeof d.sessionId === "string" && typeof d.text === "string"),
-    Array.isArray(docs) ? `docs=${docs.length}` : "no docs array"
+    "shouldFullReembed legacy undefined identity → false",
+    shouldFullReembed({ modelIdentity: undefined }, "10:20") === false
   );
 }
 {
+  check(
+    "shouldFullReembed matching identity → false",
+    shouldFullReembed({ modelIdentity: "10:20" }, "10:20") === false
+  );
+}
+{
+  check(
+    "shouldFullReembed mismatching identity → true",
+    shouldFullReembed({ modelIdentity: "10:20" }, "10:21") === true
+  );
+}
+{
+  check(
+    "shouldFullReembed old null vs current string → true",
+    shouldFullReembed({ modelIdentity: null }, "10:20") === true
+  );
+}
+{
+  check(
+    "shouldFullReembed old string vs current null → true",
+    shouldFullReembed({ modelIdentity: "10:20" }, null) === true
+  );
+}
+{
+  check(
+    "shouldFullReembed both null → false",
+    shouldFullReembed({ modelIdentity: null }, null) === false
+  );
+}
+{
+  check("partialWarningSuffix 0 → empty", partialWarningSuffix(0) === "");
+}
+{
+  check(
+    "partialWarningSuffix 2 → WARNING suffix",
+    partialWarningSuffix(2) === " (WARNING: partial index, 2 source problems — see log above)",
+    `got=${JSON.stringify(partialWarningSuffix(2))}`
+  );
+}
+{
+  check(
+    "partialWarningSuffix 1 → WARNING suffix (plural pinned)",
+    partialWarningSuffix(1) === " (WARNING: partial index, 1 source problems — see log above)",
+    `got=${JSON.stringify(partialWarningSuffix(1))}`
+  );
+}
+{
+  check(
+    "formatDoneLine 0 failures → plain line",
+    formatDoneLine(10, 4, 0) === "wrote index: 10 chunks, 4 dims",
+    `got=${JSON.stringify(formatDoneLine(10, 4, 0))}`
+  );
+}
+{
+  check(
+    "formatDoneLine 2 failures → line + suffix",
+    formatDoneLine(10, 4, 2) === "wrote index: 10 chunks, 4 dims (WARNING: partial index, 2 source problems — see log above)",
+    `got=${JSON.stringify(formatDoneLine(10, 4, 2))}`
+  );
+}
+
+// ---------------------------------------------------------------- read shapes (live local sources, shapes only, skip-on-unavailable)
+// R3 advisory: isolate from test env (clear overrides for true live) and skip if live DB locked/corrupt throws.
+{
+  const snapLive = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  delete process.env.SESSION_SEARCH_SESSION_STORE_DB;
+  delete process.env.SESSION_SEARCH_DATA_DB;
+  delete process.env.SESSION_SEARCH_STATE_DIR;
+  let res = null;
+  let threw = null;
+  try {
+    try {
+      res = readAllDocsWithFailures();
+    } catch (err) {
+      threw = err;
+    }
+    if (threw) {
+      check("readAllDocsWithFailures runs without throw", true, `SKIP live unavailable: ${threw.message}`);
+      check("readAllDocsWithFailures returns docs array", true, "SKIP live unavailable");
+      check("readAllDocsWithFailures returns failures array", true, "SKIP live unavailable");
+      check("readAllDocsWithFailures every failure has string source+reason", true, "SKIP live unavailable");
+      check("readAllDocsWithFailures docs have string sessionId+text", true, "SKIP live unavailable");
+    } else {
+      check("readAllDocsWithFailures runs without throw", true);
+      const docs = res.docs;
+      const fails = res.failures;
+      check("readAllDocsWithFailures returns docs array", Array.isArray(docs));
+      check("readAllDocsWithFailures returns failures array", Array.isArray(fails));
+      check(
+        "readAllDocsWithFailures every failure has string source+reason",
+        Array.isArray(fails) && fails.every((f) => typeof f.source === "string" && typeof f.reason === "string"),
+        `failures=${fails.length}`
+      );
+      check(
+        "readAllDocsWithFailures docs have string sessionId+text",
+        Array.isArray(docs) && docs.every((d) => typeof d.sessionId === "string" && typeof d.text === "string"),
+        `docs=${docs.length}`
+      );
+    }
+  } finally {
+    restoreEnv(snapLive);
+  }
+}
+{
+  const snapLive2 = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  delete process.env.SESSION_SEARCH_SESSION_STORE_DB;
+  delete process.env.SESSION_SEARCH_DATA_DB;
+  delete process.env.SESSION_SEARCH_STATE_DIR;
   let docs = null;
   let threw = null;
   try {
-    docs = readAllDocs();
-  } catch (err) {
-    threw = err;
+    try {
+      docs = readAllDocs();
+    } catch (err) {
+      threw = err;
+    }
+    if (threw) {
+      check("readAllDocs runs without throw", true, `SKIP live unavailable: ${threw.message}`);
+      check("readAllDocs returns plain docs array", true, "SKIP live unavailable");
+    } else {
+      check("readAllDocs runs without throw", true);
+      check("readAllDocs returns plain docs array", Array.isArray(docs));
+    }
+  } finally {
+    restoreEnv(snapLive2);
   }
-  check("readAllDocs runs without throw", threw === null, threw ? threw.message : "");
-  check("readAllDocs returns plain docs array", Array.isArray(docs));
 }
 
 // ---------------------------------------------------------------- read fixtures (isolated via temp dirs + SESSION_* env)
@@ -399,6 +502,28 @@ function restoreEnv(snap) {
     check(
       "read fixture dir-as-db: unopenable failure recorded",
       res.failures.some((f) => f.source === dirAsDb && f.reason.startsWith("unopenable:")),
+      `got=${JSON.stringify(res.failures)}`
+    );
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+// Red basis (safe targeted check): ENOTDIR on readdirSync(file) must surface as unreadable; fails if catch removed.
+{
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-filestate-"));
+  const fileAsState = join(tmpRoot, "file-as-state");
+  writeFileSync(fileAsState, "not a directory");
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = join(tmpRoot, "no-store.db");
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = fileAsState;
+  try {
+    const res = readAllDocsWithFailures();
+    check("read fixture file-as-stateDir: docs []", res.docs.length === 0, `got=${res.docs.length}`);
+    check(
+      "read fixture file-as-stateDir: unreadable failure recorded",
+      res.failures.some((f) => f.source === fileAsState && f.reason.startsWith("unreadable:")),
       `got=${JSON.stringify(res.failures)}`
     );
   } finally {
