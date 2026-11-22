@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { extRoot, modelName } from "../lib/paths.mjs";
-import { readAllDocs } from "../lib/read.mjs";
+import { readAllDocsWithFailures } from "../lib/read.mjs";
 import { chunkText, chunkKey, sha1 } from "../lib/chunk.mjs";
 import { embedDocuments, disposeEmbedder } from "../lib/embed.mjs";
-import { loadIndex, saveIndex } from "../lib/store.mjs";
+import { loadIndex, saveIndex, assertSafeToPublish } from "../lib/store.mjs";
 
 function buildChunks(docs) {
   const chunks = [];
@@ -26,7 +26,7 @@ function buildChunks(docs) {
 
 async function main() {
   process.chdir(extRoot);
-  const docs = readAllDocs();
+  const { docs, failures } = readAllDocsWithFailures();
   console.log(`sources: ${docs.length} documents`);
   const chunks = buildChunks(docs);
   console.log(`chunks: ${chunks.length}`);
@@ -44,6 +44,16 @@ async function main() {
     } catch (err) {
       console.log(`old index unreadable, rebuilding: ${err.message}`);
     }
+  }
+
+  assertSafeToPublish({
+    docsCount: docs.length,
+    failures,
+    oldChunks: old ? old.chunks.length : 0,
+  });
+  if (failures.length > 0) {
+    console.log(`WARNING: partial index — ${failures.length} source problem(s):`);
+    for (const f of failures) console.log(`WARNING:   ${f.source}: ${f.reason}`);
   }
 
   const oldByKey = new Map();
@@ -84,23 +94,35 @@ async function main() {
     `reuse: ${chunks.length - toEmbed.length}, embed: ${toEmbed.length}`
   );
 
+  const onProgress = (done, total) => {
+    if (done % 25 === 0 || done === total)
+      console.log(`embedded ${done}/${total}`);
+  };
   if (toEmbed.length > 0) {
-    const fresh = await embedDocuments(toEmbed, (done, total) => {
-      if (done % 25 === 0 || done === total)
-        console.log(`embedded ${done}/${total}`);
-    });
+    const fresh = await embedDocuments(toEmbed, onProgress);
     fresh.forEach((v, j) => {
       vectors[toEmbedAt[j]] = v;
     });
-    await disposeEmbedder();
   }
 
-  const dims = vectors.length > 0 ? vectors[0].length : old ? old.dims : 0;
-  if (vectors.length === 0) {
-    console.log("no chunks to index, writing empty index");
-    saveIndex([], [], dims);
-    return;
+  // Reused vectors can disagree with fresh ones when the model file was
+  // swapped under the same name (the basename check above can't see that).
+  // Uniformity is the real signal: mixed rows mean the model changed.
+  if (new Set(vectors.map((v) => v.length)).size > 1) {
+    console.log(
+      "dims disagreement between reused and fresh vectors, full re-embed"
+    );
+    const fresh = await embedDocuments(
+      chunks.map((c) => c.text),
+      onProgress
+    );
+    fresh.forEach((v, j) => {
+      vectors[j] = v;
+    });
   }
+  await disposeEmbedder();
+
+  const dims = vectors[0].length;
   saveIndex(vectors, chunks, dims);
   console.log(`wrote index: ${chunks.length} chunks, ${dims} dims`);
 }
