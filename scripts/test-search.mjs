@@ -31,13 +31,11 @@ for (const query of ["hello", "mcp server setup", "github copilot extension"]) {
     (r) => r.score >= -1.01 && r.score <= 1.01 && r.title && r.snippet && r.sourceType
   );
   check(`query "${query}" fields sane`, sane);
-  const perSession = new Map();
-  for (const r of results) perSession.set(r.sessionId, (perSession.get(r.sessionId) || 0) + 1);
-  const distinctSessions = new Set(index.chunks.map((c) => c.sessionId)).size;
+  // Diversity is pinned by the unit starvation fixture (scripts/test-unit.mjs); live asserts fill.
   check(
-    `query "${query}" per-session cap`,
-    distinctSessions < 3 || Math.max(...perSession.values()) <= 2,
-    JSON.stringify([...perSession.values()])
+    `query "${query}" fills to limit`,
+    results.length === Math.min(5, index.chunks.length),
+    `got=${results.length} chunks=${index.chunks.length}`
   );
 }
 

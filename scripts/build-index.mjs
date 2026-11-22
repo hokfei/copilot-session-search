@@ -1,9 +1,9 @@
 import { existsSync } from "node:fs";
 import { extRoot, modelName } from "../lib/paths.mjs";
-import { readAllDocs } from "../lib/read.mjs";
+import { readAllDocsWithFailures } from "../lib/read.mjs";
 import { chunkText, chunkKey, sha1 } from "../lib/chunk.mjs";
 import { embedDocuments, disposeEmbedder } from "../lib/embed.mjs";
-import { loadIndex, saveIndex } from "../lib/store.mjs";
+import { loadIndex, saveIndex, assertSafeToPublish, modelFileIdentity, resolveIndexPaths, shouldFullReembed, sweepStaleTempFiles, formatDoneLine, partialWarningSuffix } from "../lib/store.mjs";
 
 function buildChunks(docs) {
   const chunks = [];
@@ -26,24 +26,43 @@ function buildChunks(docs) {
 
 async function main() {
   process.chdir(extRoot);
-  const docs = readAllDocs();
+  sweepStaleTempFiles();
+  const { docs, failures } = readAllDocsWithFailures();
   console.log(`sources: ${docs.length} documents`);
   const chunks = buildChunks(docs);
   console.log(`chunks: ${chunks.length}`);
 
+  // Capture once: a mid-build model-file replacement must not bless old vectors.
+  const buildModel = { name: modelName, identity: modelFileIdentity() };
   let old = null;
-  if (existsSync("index.meta.json")) {
+  if (existsSync(resolveIndexPaths().meta)) {
     try {
       old = loadIndex();
-      if (old.meta.model !== modelName) {
+      if (old && old.meta.model !== modelName) {
         console.log(
           `model changed (${old.meta.model} -> ${modelName}), full re-embed`
         );
         old = null;
       }
+      // Same-name weight swap: basename and dims can't see it, size+mtime can.
+      // Runs before the unchanged fast-path below so a swap is never skipped.
+      if (shouldFullReembed(old && old.meta, buildModel.identity)) {
+        console.log("model file changed (size/mtime), full re-embed");
+        old = null;
+      }
     } catch (err) {
       console.log(`old index unreadable, rebuilding: ${err.message}`);
     }
+  }
+
+  assertSafeToPublish({
+    docsCount: docs.length,
+    failures,
+    oldChunks: old ? old.chunks.length : 0,
+  });
+  if (failures.length > 0) {
+    console.log(`WARNING: partial index — ${failures.length} source problem(s):`);
+    for (const f of failures) console.log(`WARNING:   ${f.source}: ${f.reason}`);
   }
 
   const oldByKey = new Map();
@@ -64,7 +83,7 @@ async function main() {
       return prev && prev.hash === c.hash;
     });
   if (unchanged) {
-    console.log("nothing changed, index untouched");
+    console.log(`nothing changed, index untouched${partialWarningSuffix(failures)}`);
     return;
   }
 
@@ -84,25 +103,29 @@ async function main() {
     `reuse: ${chunks.length - toEmbed.length}, embed: ${toEmbed.length}`
   );
 
+  const onProgress = (done, total) => {
+    if (done % 25 === 0 || done === total)
+      console.log(`embedded ${done}/${total}`);
+  };
   if (toEmbed.length > 0) {
-    const fresh = await embedDocuments(toEmbed, (done, total) => {
-      if (done % 25 === 0 || done === total)
-        console.log(`embedded ${done}/${total}`);
-    });
+    const fresh = await embedDocuments(toEmbed, onProgress);
     fresh.forEach((v, j) => {
       vectors[toEmbedAt[j]] = v;
     });
-    await disposeEmbedder();
   }
 
-  const dims = vectors.length > 0 ? vectors[0].length : old ? old.dims : 0;
-  if (vectors.length === 0) {
-    console.log("no chunks to index, writing empty index");
-    saveIndex([], [], dims);
-    return;
-  }
-  saveIndex(vectors, chunks, dims);
-  console.log(`wrote index: ${chunks.length} chunks, ${dims} dims`);
+  // Note: no mixed-dims re-embed branch. Mixed rows can only arise from an
+  // inconsistent embedder (a model swap forces old=null above, so reuse
+  // always matches fresh); re-embedding with the same model could not fix
+  // it, so saveIndex's per-row validation fails loudly instead.
+  await disposeEmbedder();
+
+  // Unreachable (docs>0 implies chunks>0), but refuse with the friendly
+  // message instead of a TypeError if it ever happens.
+  if (vectors.length === 0) saveIndex([], [], 0);
+  const dims = vectors[0].length;
+  saveIndex(vectors, chunks, dims, buildModel);
+  console.log(formatDoneLine(chunks.length, dims, failures));
 }
 
 main().catch((err) => {

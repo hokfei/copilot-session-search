@@ -13,6 +13,7 @@
   "scripts": {
     "build": "node scripts/build-index.mjs",
     "test": "node scripts/test-search.mjs",
+    "test:unit": "node scripts/test-unit.mjs",
     "schedule": "node scripts/schedule-daily.mjs"
   },
   "dependencies": {
