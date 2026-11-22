@@ -97,7 +97,7 @@ lib/paths.mjs          path resolution (relative, no hardcoded usernames)
 lib/read.mjs           read-only session store readers
 lib/chunk.mjs          sliding-window chunking + keying/hashing
 lib/embed.mjs          local embedding (lazy-loaded, L2-normalized)
-lib/store.mjs          Float32 bin + JSON meta persistence
+lib/store.mjs          index persistence + publish lock/guards/sweep
 lib/search.mjs         brute-force dot-product search + soft per-session cap
 scripts/build-index.mjs    incremental index builder
 scripts/test-search.mjs    self-consistency tests

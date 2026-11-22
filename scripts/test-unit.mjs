@@ -466,6 +466,82 @@ function restoreEnv(snap) {
   }
 }
 {
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-noturns-"));
+  const dbPath = join(tmpRoot, "store.db");
+  const stateEmpty = join(tmpRoot, "state-empty");
+  mkdirSync(stateEmpty, { recursive: true });
+  const summaryText = "This is a sessions-only summary exceeding forty characters for testing";
+  const setup = new DatabaseSync(dbPath);
+  try {
+    setup.exec("CREATE TABLE sessions (id TEXT, summary TEXT, created_at TEXT)");
+    setup.prepare("INSERT INTO sessions (id, summary, created_at) VALUES (?, ?, ?)").run("sess-noturns", summaryText, "2024-02-03T04:05:06.000Z");
+  } finally {
+    setup.close();
+  }
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = dbPath;
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = stateEmpty;
+  try {
+    const res = readAllDocsWithFailures();
+    check("read fixture sessions-no-turns: collects 1 doc", res.docs.length === 1, `got=${res.docs.length}`);
+    check(
+      "read fixture sessions-no-turns: summary doc present",
+      res.docs.some((d) => d.sourceType === "summary" && d.text === summaryText)
+    );
+    check("read fixture sessions-no-turns: 1 failure", res.failures.length === 1, `got=${JSON.stringify(res.failures)}`);
+    check(
+      "read fixture sessions-no-turns: exact turns-missing reason",
+      res.failures.length === 1 &&
+        res.failures[0].source === dbPath &&
+        res.failures[0].reason === "missing table 'turns'",
+      `got=${JSON.stringify(res.failures)}`
+    );
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+{
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-nosess-"));
+  const dbPath = join(tmpRoot, "store.db");
+  const stateEmpty = join(tmpRoot, "state-empty");
+  mkdirSync(stateEmpty, { recursive: true });
+  const turnUser = "This is a turns-only user message exceeding forty characters 333";
+  const turnAsst = "This is a turns-only assistant reply exceeding forty characters 444";
+  const setup = new DatabaseSync(dbPath);
+  try {
+    setup.exec("CREATE TABLE turns (session_id TEXT, turn_index INTEGER, user_message TEXT, assistant_response TEXT, timestamp TEXT)");
+    setup.prepare("INSERT INTO turns (session_id, turn_index, user_message, assistant_response, timestamp) VALUES (?, ?, ?, ?, ?)").run("sess-nosess", 0, turnUser, turnAsst, "2024-03-04T05:06:07.000Z");
+  } finally {
+    setup.close();
+  }
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = dbPath;
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = stateEmpty;
+  try {
+    const res = readAllDocsWithFailures();
+    check("read fixture turns-no-sessions: collects 2 docs", res.docs.length === 2, `got=${res.docs.length}`);
+    check(
+      "read fixture turns-no-sessions: titles fall back to Untitled",
+      res.docs.length === 2 && res.docs.every((d) => d.title === "Untitled session"),
+      `got=${JSON.stringify(res.docs.map((d) => d.title))}`
+    );
+    check("read fixture turns-no-sessions: 1 failure", res.failures.length === 1, `got=${JSON.stringify(res.failures)}`);
+    check(
+      "read fixture turns-no-sessions: exact sessions-missing reason",
+      res.failures.length === 1 &&
+        res.failures[0].source === dbPath &&
+        res.failures[0].reason === "missing table 'sessions'",
+      `got=${JSON.stringify(res.failures)}`
+    );
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+{
   const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-empty-"));
   const stateEmpty = join(tmpRoot, "state");
   mkdirSync(stateEmpty, { recursive: true });
