@@ -45,6 +45,12 @@ Invoke-WebRequest -Uri "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/re
 
 Or point `SESSION_SEARCH_MODEL_PATH` at a model you already have.
 
+Test/fixture overrides (used by `npm run test:unit`, rarely needed otherwise):
+`SESSION_SEARCH_INDEX_BIN`, `SESSION_SEARCH_INDEX_META`,
+`SESSION_SEARCH_INDEX_LOCK` relocate the published index;
+`SESSION_SEARCH_SESSION_STORE_DB`, `SESSION_SEARCH_DATA_DB`,
+`SESSION_SEARCH_STATE_DIR` relocate the read sources.
+
 ```bash
 # 3. Build the index
 npm run build
