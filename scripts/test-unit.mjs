@@ -1,14 +1,21 @@
 import { searchVectors } from "../lib/search.mjs";
-import { saveIndex, loadIndex, assertSafeToPublish } from "../lib/store.mjs";
+import { saveIndex, loadIndex, assertSafeToPublish, modelFileIdentity } from "../lib/store.mjs";
 import { readAllDocsWithFailures, readAllDocs } from "../lib/read.mjs";
-import { extRoot, indexBinPath, indexMetaPath, indexLockPath } from "../lib/paths.mjs";
+import { extRoot, indexBinPath, indexMetaPath } from "../lib/paths.mjs";
 import {
   existsSync,
   readFileSync,
   writeFileSync,
   unlinkSync,
   utimesSync,
+  statSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
 } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { createHash } from "node:crypto";
 
 process.chdir(extRoot);
@@ -24,6 +31,22 @@ function check(name, cond, detail = "") {
 
 function sha1Of(buf) {
   return createHash("sha1").update(buf).digest("hex");
+}
+
+// Safety: real index must never be touched (all save/load use temp via INDEX_*).
+const realBinSha0 = existsSync(indexBinPath) ? sha1Of(readFileSync(indexBinPath)) : null;
+const realMetaSha0 = existsSync(indexMetaPath) ? sha1Of(readFileSync(indexMetaPath)) : null;
+
+function snapshotEnv(keys) {
+  const snap = {};
+  for (const k of keys) snap[k] = process.env[k];
+  return snap;
+}
+function restoreEnv(snap) {
+  for (const k of Object.keys(snap)) {
+    if (snap[k] === undefined) delete process.env[k];
+    else process.env[k] = snap[k];
+  }
 }
 
 // ---------------------------------------------------------------- search: capped merge scans full list
@@ -188,6 +211,24 @@ function sha1Of(buf) {
     `message=${JSON.stringify(msg)}`
   );
 }
+// Red basis (code-evident): pre-fix signature had no defaults, so () threw TypeError.
+{
+  let msg = "";
+  let threw = false;
+  let isTypeError = false;
+  try {
+    assertSafeToPublish();
+  } catch (err) {
+    threw = true;
+    msg = err.message;
+    isTypeError = err instanceof TypeError;
+  }
+  check(
+    "assertSafeToPublish() no-arg throws friendly /nothing to publish/",
+    threw && !isTypeError && /nothing to publish/.test(msg),
+    `message=${JSON.stringify(msg)} isTypeError=${isTypeError}`
+  );
+}
 
 // ---------------------------------------------------------------- read shapes (live local sources, shapes only)
 {
@@ -226,20 +267,160 @@ function sha1Of(buf) {
   check("readAllDocs returns plain docs array", Array.isArray(docs));
 }
 
-// ---------------------------------------------------------------- save/load/locking (touches real index: backup+restore)
+// ---------------------------------------------------------------- read fixtures (isolated via temp dirs + SESSION_* env)
+// Red basis for all isolated read tests (code-evident): SESSION_SEARCH_* overrides
+// did not exist pre-fix, so fixtures would have read live sources and counts would not match.
 {
-  const haveBin = existsSync(indexBinPath);
-  const haveMeta = existsSync(indexMetaPath);
-  const origBin = haveBin ? readFileSync(indexBinPath) : null;
-  const origMeta = haveMeta ? readFileSync(indexMetaPath) : null;
-  const origBinSha = origBin ? sha1Of(origBin) : null;
-  const origMetaSha = origMeta ? sha1Of(origMeta) : null;
-  // Deterministic start: no build should run during tests.
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-ev-"));
+  const stateDir = join(tmpRoot, "state");
+  const sessDir = join(stateDir, "sess-ev1");
+  mkdirSync(sessDir, { recursive: true });
+  const eventsPath = join(sessDir, "events.jsonl");
+  const userText = "This is a sufficiently long user message for fixture testing 12345";
+  const asstText = "This is a sufficiently long assistant reply for fixture testing 67890";
+  const lines = [
+    JSON.stringify({ type: "user.message", id: "m1", data: { messageId: "m1", content: userText } }),
+    JSON.stringify({ type: "assistant.message", id: "m2", data: { messageId: "m2", content: asstText } }),
+    "{not json",
+    JSON.stringify({ type: "user.message", id: "m3", data: { messageId: "m3", content: "short" } }),
+    JSON.stringify({ type: "other.event", id: "m4", data: {} }),
+  ];
+  writeFileSync(eventsPath, lines.join("\n") + "\n");
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = join(tmpRoot, "no-store.db");
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = stateDir;
   try {
-    unlinkSync(indexLockPath);
-  } catch {
-    // Absent: nothing to clean.
+    const res = readAllDocsWithFailures();
+    check("read fixture events: collects 2 docs", res.docs.length === 2, `got=${res.docs.length}`);
+    check("read fixture events: user doc present", res.docs.some((d) => d.text === userText));
+    check("read fixture events: assistant doc present", res.docs.some((d) => d.text === asstText));
+    check("read fixture events: 1 malformed failure", res.failures.length === 1, `got=${JSON.stringify(res.failures)}`);
+    check(
+      "read fixture events: badLines entry has source+reason",
+      res.failures.length === 1 &&
+        res.failures[0].source === eventsPath &&
+        res.failures[0].reason === "1 malformed lines skipped",
+      `got=${JSON.stringify(res.failures)}`
+    );
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
   }
+}
+{
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-db-"));
+  const dbPath = join(tmpRoot, "store.db");
+  const stateEmpty = join(tmpRoot, "state-empty");
+  mkdirSync(stateEmpty, { recursive: true });
+  const summaryText = "This is a long summary text that exceeds forty characters for testing";
+  const turnUser = "This is a long user turn message exceeding forty characters 111";
+  const turnAsst = "This is a long assistant turn reply exceeding forty characters 222";
+  const setup = new DatabaseSync(dbPath);
+  try {
+    setup.exec("CREATE TABLE sessions (id TEXT, summary TEXT, created_at TEXT)");
+    setup.exec("CREATE TABLE turns (session_id TEXT, turn_index INTEGER, user_message TEXT, assistant_response TEXT, timestamp TEXT)");
+    setup.prepare("INSERT INTO sessions (id, summary, created_at) VALUES (?, ?, ?)").run("sess-db1", summaryText, "2024-01-02T03:04:05.000Z");
+    setup.prepare("INSERT INTO turns (session_id, turn_index, user_message, assistant_response, timestamp) VALUES (?, ?, ?, ?, ?)").run("sess-db1", 0, turnUser, turnAsst, "2024-01-02T04:00:00.000Z");
+  } finally {
+    setup.close();
+  }
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = dbPath;
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = stateEmpty;
+  try {
+    const res = readAllDocsWithFailures();
+    check("read fixture db: collects 3 docs (summary+2 turns)", res.docs.length === 3, `got=${res.docs.length}`);
+    check(
+      "read fixture db: summary doc present",
+      res.docs.some((d) => d.sourceType === "summary" && d.text === summaryText)
+    );
+    check(
+      "read fixture db: turn user doc present",
+      res.docs.some((d) => d.text === turnUser && d.sourceType === "user-message" && d.sourceId === "turn-0")
+    );
+    check(
+      "read fixture db: turn assistant doc present",
+      res.docs.some((d) => d.text === turnAsst && d.sourceType === "assistant-message" && d.sourceId === "turn-0")
+    );
+    check("read fixture db: no failures", res.failures.length === 0, `got=${JSON.stringify(res.failures)}`);
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+{
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-empty-"));
+  const stateEmpty = join(tmpRoot, "state");
+  mkdirSync(stateEmpty, { recursive: true });
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = join(tmpRoot, "no-store.db");
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = stateEmpty;
+  try {
+    const res = readAllDocsWithFailures();
+    check("read fixture empty dir: docs []", res.docs.length === 0, `got=${res.docs.length}`);
+    check("read fixture empty dir: failures []", res.failures.length === 0, `got=${JSON.stringify(res.failures)}`);
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+{
+  // Red basis (code-evident): old readEventsDocs pushed unreadable failure for missing dir.
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-absent-"));
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = join(tmpRoot, "no-store.db");
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = join(tmpRoot, "no-such-state-dir");
+  try {
+    const res = readAllDocsWithFailures();
+    check("read fixture absent state dir: docs []", res.docs.length === 0, `got=${res.docs.length}`);
+    check("read fixture absent state dir: failures [] (silent)", res.failures.length === 0, `got=${JSON.stringify(res.failures)}`);
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+{
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-unopen-"));
+  const dirAsDb = join(tmpRoot, "dir-as-db");
+  mkdirSync(dirAsDb, { recursive: true });
+  const stateEmpty = join(tmpRoot, "state-empty");
+  mkdirSync(stateEmpty, { recursive: true });
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = dirAsDb;
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = stateEmpty;
+  try {
+    const res = readAllDocsWithFailures();
+    check("read fixture dir-as-db: docs []", res.docs.length === 0, `got=${res.docs.length}`);
+    check(
+      "read fixture dir-as-db: unopenable failure recorded",
+      res.failures.some((f) => f.source === dirAsDb && f.reason.startsWith("unopenable:")),
+      `got=${JSON.stringify(res.failures)}`
+    );
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// ---------------------------------------------------------------- save/load/locking (isolated via temp dir + INDEX_* env)
+{
+  const tmpIdx = mkdtempSync(join(tmpdir(), "ss-unit-idx-"));
+  const tBin = join(tmpIdx, "index.bin");
+  const tMeta = join(tmpIdx, "index.meta.json");
+  const tLock = join(tmpIdx, "index.lock");
+  const snapIdx = snapshotEnv(["SESSION_SEARCH_INDEX_BIN", "SESSION_SEARCH_INDEX_META", "SESSION_SEARCH_INDEX_LOCK"]);
+  process.env.SESSION_SEARCH_INDEX_BIN = tBin;
+  process.env.SESSION_SEARCH_INDEX_META = tMeta;
+  process.env.SESSION_SEARCH_INDEX_LOCK = tLock;
+  // Shadow real paths so test-local file checks also hit temp.
+  const indexBinPath = tBin;
+  const indexMetaPath = tMeta;
+  const indexLockPath = tLock;
 
   const fixtureDims = 4;
   const fixtureChunks = [
@@ -298,6 +479,45 @@ function sha1Of(buf) {
         check(
           "saveIndex refuses negative dims",
           /invalid dims/.test(err.message),
+          `message=${JSON.stringify(err.message)}`
+        );
+      }
+      // Red basis (prior demo): red-f5.mjs showed F5 TypeError for 2 vectors/3 chunks.
+      try {
+        saveIndex(
+          [
+            [1, 2, 3, 4],
+            [5, 6, 7, 8],
+          ],
+          [
+            ...fixtureChunks,
+            { sessionId: "S3", title: "t3", sourceType: "unit", date: null, text: "hello world fixture three" },
+          ],
+          fixtureDims
+        );
+        check("saveIndex refuses 2 vectors for 3 chunks", false, "did not throw");
+      } catch (err) {
+        check(
+          "saveIndex refuses 2 vectors for 3 chunks",
+          /2 vectors for 3 chunks/.test(err.message),
+          `message=${JSON.stringify(err.message)}`
+        );
+      }
+      // Red basis (code-evident): old loop did vectors[i].length without null check, so TypeError.
+      try {
+        saveIndex(
+          [
+            [1, 2, 3, 4],
+            undefined,
+          ],
+          fixtureChunks,
+          fixtureDims
+        );
+        check("saveIndex refuses row with no vector", false, "did not throw");
+      } catch (err) {
+        check(
+          "saveIndex refuses row with no vector",
+          /row 1 has no vector/.test(err.message),
           `message=${JSON.stringify(err.message)}`
         );
       }
@@ -435,59 +655,83 @@ function sha1Of(buf) {
           // Already gone.
         }
       }
+
+      // Red basis (code-evident): INDEX_* env did not exist pre-fix, so temp files would not exist.
+      check(
+        "saveIndex writes to temp paths via INDEX_* overrides",
+        existsSync(indexBinPath) && existsSync(indexMetaPath),
+        `bin=${existsSync(indexBinPath)} meta=${existsSync(indexMetaPath)}`
+      );
+
+      // Red basis (code-evident): modelFileIdentity/meta.modelIdentity did not exist pre-fix.
+      {
+        const tmpModel = mkdtempSync(join(tmpdir(), "ss-unit-model-"));
+        const modelFile = join(tmpModel, "fake-model.gguf");
+        writeFileSync(modelFile, "fake model bytes for testing");
+        const st = statSync(modelFile);
+        const expectedIdentity = `${st.size}:${Math.floor(st.mtimeMs)}`;
+        const snapModel = snapshotEnv(["SESSION_SEARCH_MODEL_PATH"]);
+        process.env.SESSION_SEARCH_MODEL_PATH = modelFile;
+        try {
+          saveIndex(fixtureVectors, fixtureChunks, fixtureDims);
+          const withIdentity = loadIndex();
+          check(
+            "saveIndex persists meta.modelIdentity from model file",
+            withIdentity !== null && withIdentity.meta.modelIdentity === expectedIdentity,
+            withIdentity ? `got=${JSON.stringify(withIdentity.meta.modelIdentity)} want=${expectedIdentity}` : "no load"
+          );
+        } finally {
+          restoreEnv(snapModel);
+          try { rmSync(tmpModel, { recursive: true, force: true }); } catch {}
+        }
+      }
     } catch (unexpected) {
       check("save/lock block unexpected error", false, String((unexpected && unexpected.message) || unexpected));
     }
   } finally {
-    // Restore the user's real index even on failure, then verify byte-identical.
-    try {
-      if (origBin) writeFileSync(indexBinPath, origBin);
-      else {
-        try {
-          unlinkSync(indexBinPath);
-        } catch {
-          // Never existed.
-        }
-      }
-      if (origMeta) writeFileSync(indexMetaPath, origMeta);
-      else {
-        try {
-          unlinkSync(indexMetaPath);
-        } catch {
-          // Never existed.
-        }
-      }
-      let ok = true;
-      let detail = "";
-      if (origBin) {
-        const cur = sha1Of(readFileSync(indexBinPath));
-        if (cur !== origBinSha) {
-          ok = false;
-          detail += `bin ${cur.slice(0, 8)}!=${origBinSha.slice(0, 8)} `;
-        }
-      }
-      if (origMeta) {
-        const curM = sha1Of(readFileSync(indexMetaPath));
-        if (curM !== origMetaSha) {
-          ok = false;
-          detail += `meta ${curM.slice(0, 8)}!=${origMetaSha.slice(0, 8)}`;
-        }
-      }
-      check("real index restored byte-identical", ok, detail.trim());
-      try {
-        unlinkSync(indexLockPath);
-      } catch {
-        // Released: nothing to clean.
-      }
-    } catch (restoreErr) {
-      check("real index restored byte-identical", false, `restore failed: ${restoreErr.message}`);
-      try {
-        unlinkSync(indexLockPath);
-      } catch {
-        // Best effort.
-      }
-    }
+    restoreEnv(snapIdx);
+    try { rmSync(tmpIdx, { recursive: true, force: true }); } catch {}
   }
+}
+
+// ---------------------------------------------------------------- modelFileIdentity (isolated via temp file + MODEL_PATH env)
+// Red basis (code-evident): modelFileIdentity did not exist pre-fix.
+{
+  const tmpModel = mkdtempSync(join(tmpdir(), "ss-unit-ident-"));
+  const modelFile = join(tmpModel, "fake-model.gguf");
+  writeFileSync(modelFile, "fake model bytes for identity testing");
+  const st = statSync(modelFile);
+  const expected = `${st.size}:${Math.floor(st.mtimeMs)}`;
+  const snap = snapshotEnv(["SESSION_SEARCH_MODEL_PATH"]);
+  process.env.SESSION_SEARCH_MODEL_PATH = modelFile;
+  try {
+    const got = modelFileIdentity();
+    check("modelFileIdentity matches size:mtime via statSync", got === expected, `got=${got} want=${expected}`);
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpModel, { recursive: true, force: true }); } catch {}
+  }
+}
+{
+  const tmpModel = mkdtempSync(join(tmpdir(), "ss-unit-ident-miss-"));
+  const missing = join(tmpModel, "no-such-model.gguf");
+  const snap = snapshotEnv(["SESSION_SEARCH_MODEL_PATH"]);
+  process.env.SESSION_SEARCH_MODEL_PATH = missing;
+  try {
+    const got = modelFileIdentity();
+    check("modelFileIdentity null when model missing", got === null, `got=${JSON.stringify(got)}`);
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpModel, { recursive: true, force: true }); } catch {}
+  }
+}
+
+// Safety: real index must be unchanged (temp isolation, no backup/restore).
+{
+  const curBinSha = existsSync(indexBinPath) ? sha1Of(readFileSync(indexBinPath)) : null;
+  const curMetaSha = existsSync(indexMetaPath) ? sha1Of(readFileSync(indexMetaPath)) : null;
+  check("safety: real index.bin unchanged (temp isolation)", curBinSha === realBinSha0);
+  check("safety: real index.meta.json unchanged (temp isolation)", curMetaSha === realMetaSha0);
 }
 
 if (failures.length > 0) {
