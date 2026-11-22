@@ -3,7 +3,7 @@ import { extRoot, modelName } from "../lib/paths.mjs";
 import { readAllDocsWithFailures } from "../lib/read.mjs";
 import { chunkText, chunkKey, sha1 } from "../lib/chunk.mjs";
 import { embedDocuments, disposeEmbedder } from "../lib/embed.mjs";
-import { loadIndex, saveIndex, assertSafeToPublish, modelFileIdentity } from "../lib/store.mjs";
+import { loadIndex, saveIndex, assertSafeToPublish, modelFileIdentity, resolveIndexPaths, shouldFullReembed, formatDoneLine, partialWarningSuffix } from "../lib/store.mjs";
 
 function buildChunks(docs) {
   const chunks = [];
@@ -32,10 +32,10 @@ async function main() {
   console.log(`chunks: ${chunks.length}`);
 
   let old = null;
-  if (existsSync("index.meta.json")) {
+  if (existsSync(resolveIndexPaths().meta)) {
     try {
       old = loadIndex();
-      if (old.meta.model !== modelName) {
+      if (old && old.meta.model !== modelName) {
         console.log(
           `model changed (${old.meta.model} -> ${modelName}), full re-embed`
         );
@@ -43,11 +43,7 @@ async function main() {
       }
       // Same-name weight swap: basename and dims can't see it, size+mtime can.
       // Runs before the unchanged fast-path below so a swap is never skipped.
-      if (
-        old &&
-        old.meta.modelIdentity !== undefined &&
-        old.meta.modelIdentity !== modelFileIdentity()
-      ) {
+      if (shouldFullReembed(old && old.meta, modelFileIdentity())) {
         console.log("model file changed (size/mtime), full re-embed");
         old = null;
       }
@@ -84,7 +80,7 @@ async function main() {
       return prev && prev.hash === c.hash;
     });
   if (unchanged) {
-    console.log("nothing changed, index untouched");
+    console.log(`nothing changed, index untouched${partialWarningSuffix(failures.length)}`);
     return;
   }
 
@@ -134,11 +130,7 @@ async function main() {
 
   const dims = vectors[0].length;
   saveIndex(vectors, chunks, dims);
-  let doneLine = `wrote index: ${chunks.length} chunks, ${dims} dims`;
-  if (failures.length > 0) {
-    doneLine += ` (WARNING: partial index, ${failures.length} source problems — see log above)`;
-  }
-  console.log(doneLine);
+  console.log(formatDoneLine(chunks.length, dims, failures.length));
 }
 
 main().catch((err) => {
