@@ -68,6 +68,8 @@ npm run build
 ## Reindexing
 
 - Ask the assistant to call `reindex_sessions`, or run `npm run build` here.
+- If a build is killed mid-publish, delete `index.lock` to unblock the next
+  run (stale locks also auto-clear after 2h).
 - Indexing is incremental: unchanged chunks reuse their stored vectors, and if
   nothing changed no files are written.
 - For an hourly refresh: `npm run schedule` registers an OS scheduled task

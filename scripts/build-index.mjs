@@ -3,7 +3,7 @@ import { extRoot, modelName } from "../lib/paths.mjs";
 import { readAllDocsWithFailures } from "../lib/read.mjs";
 import { chunkText, chunkKey, sha1 } from "../lib/chunk.mjs";
 import { embedDocuments, disposeEmbedder } from "../lib/embed.mjs";
-import { loadIndex, saveIndex, assertSafeToPublish, modelFileIdentity, resolveIndexPaths, shouldFullReembed, hasMixedDims, formatDoneLine, partialWarningSuffix } from "../lib/store.mjs";
+import { loadIndex, saveIndex, assertSafeToPublish, modelFileIdentity, resolveIndexPaths, shouldFullReembed, sweepStaleTempFiles, formatDoneLine, partialWarningSuffix } from "../lib/store.mjs";
 
 function buildChunks(docs) {
   const chunks = [];
@@ -26,11 +26,14 @@ function buildChunks(docs) {
 
 async function main() {
   process.chdir(extRoot);
+  sweepStaleTempFiles();
   const { docs, failures } = readAllDocsWithFailures();
   console.log(`sources: ${docs.length} documents`);
   const chunks = buildChunks(docs);
   console.log(`chunks: ${chunks.length}`);
 
+  // Capture once: a mid-build model-file replacement must not bless old vectors.
+  const buildModel = { name: modelName, identity: modelFileIdentity() };
   let old = null;
   if (existsSync(resolveIndexPaths().meta)) {
     try {
@@ -43,7 +46,7 @@ async function main() {
       }
       // Same-name weight swap: basename and dims can't see it, size+mtime can.
       // Runs before the unchanged fast-path below so a swap is never skipped.
-      if (shouldFullReembed(old && old.meta, modelFileIdentity())) {
+      if (shouldFullReembed(old && old.meta, buildModel.identity)) {
         console.log("model file changed (size/mtime), full re-embed");
         old = null;
       }
@@ -111,25 +114,17 @@ async function main() {
     });
   }
 
-  // Reused vectors can disagree with fresh ones when the model file was
-  // swapped under the same name (the basename check above can't see that).
-  // Uniformity is the real signal: mixed rows mean the model changed.
-  if (hasMixedDims(vectors)) {
-    console.log(
-      "dims disagreement between reused and fresh vectors, full re-embed"
-    );
-    const fresh = await embedDocuments(
-      chunks.map((c) => c.text),
-      onProgress
-    );
-    fresh.forEach((v, j) => {
-      vectors[j] = v;
-    });
-  }
+  // Note: no mixed-dims re-embed branch. Mixed rows can only arise from an
+  // inconsistent embedder (a model swap forces old=null above, so reuse
+  // always matches fresh); re-embedding with the same model could not fix
+  // it, so saveIndex's per-row validation fails loudly instead.
   await disposeEmbedder();
 
+  // Unreachable (docs>0 implies chunks>0), but refuse with the friendly
+  // message instead of a TypeError if it ever happens.
+  if (vectors.length === 0) saveIndex([], [], 0);
   const dims = vectors[0].length;
-  saveIndex(vectors, chunks, dims);
+  saveIndex(vectors, chunks, dims, buildModel);
   console.log(formatDoneLine(chunks.length, dims, failures));
 }
 

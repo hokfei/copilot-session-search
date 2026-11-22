@@ -1,7 +1,7 @@
 import { searchVectors } from "../lib/search.mjs";
-import { saveIndex, loadIndex, assertSafeToPublish, modelFileIdentity, shouldFullReembed, partialWarningSuffix, formatDoneLine, hasMixedDims } from "../lib/store.mjs";
+import { saveIndex, loadIndex, assertSafeToPublish, modelFileIdentity, shouldFullReembed, partialWarningSuffix, formatDoneLine, sweepStaleTempFiles } from "../lib/store.mjs";
 import { readAllDocsWithFailures } from "../lib/read.mjs";
-import { extRoot, indexBinPath, indexMetaPath } from "../lib/paths.mjs";
+import { extRoot, indexBinPath, indexMetaPath, modelName } from "../lib/paths.mjs";
 import {
   existsSync,
   readFileSync,
@@ -229,7 +229,7 @@ function restoreEnv(snap) {
   );
 }
 
-// ---------------------------------------------------------------- R3 pure helpers (shouldFullReembed/partialWarningSuffix/formatDoneLine/hasMixedDims)
+// ---------------------------------------------------------------- R3 pure helpers (shouldFullReembed/partialWarningSuffix/formatDoneLine)
 {
   check("shouldFullReembed null oldMeta → false", shouldFullReembed(null, "10:20") === false);
 }
@@ -268,15 +268,6 @@ function restoreEnv(snap) {
     "shouldFullReembed both null → false",
     shouldFullReembed({ modelIdentity: null }, null) === false
   );
-}
-{
-  check("hasMixedDims uniform → false", hasMixedDims([[1, 2], [3, 4]]) === false);
-}
-{
-  check("hasMixedDims mixed → true", hasMixedDims([[1, 2], [3, 4, 5]]) === true);
-}
-{
-  check("hasMixedDims empty → false", hasMixedDims([]) === false);
 }
 {
   check("partialWarningSuffix [] → empty", partialWarningSuffix([]) === "");
@@ -822,6 +813,49 @@ function restoreEnv(snap) {
           try { rmSync(tmpModel, { recursive: true, force: true }); } catch {}
         }
       }
+      {
+        const tmpModel = mkdtempSync(join(tmpdir(), "ss-unit-modelexp-"));
+        const modelFile = join(tmpModel, "other-model.gguf");
+        writeFileSync(modelFile, "different model bytes");
+        const snapModel = snapshotEnv(["SESSION_SEARCH_MODEL_PATH"]);
+        process.env.SESSION_SEARCH_MODEL_PATH = modelFile;
+        try {
+          saveIndex(fixtureVectors, fixtureChunks, fixtureDims, { name: "custom-model.gguf", identity: "123:456" });
+          const loadedExp = loadIndex();
+          check(
+            "saveIndex explicit model name persisted verbatim",
+            loadedExp !== null && loadedExp.meta.model === "custom-model.gguf",
+            loadedExp ? `got=${JSON.stringify(loadedExp.meta.model)}` : "no load"
+          );
+          check(
+            "saveIndex explicit model identity persisted verbatim",
+            loadedExp !== null && loadedExp.meta.modelIdentity === "123:456",
+            loadedExp ? `got=${JSON.stringify(loadedExp.meta.modelIdentity)}` : "no load"
+          );
+        } finally {
+          restoreEnv(snapModel);
+          try { rmSync(tmpModel, { recursive: true, force: true }); } catch {}
+        }
+      }
+      {
+        const tmpModel = mkdtempSync(join(tmpdir(), "ss-unit-modelomit-"));
+        const modelFile = join(tmpModel, "live-model.gguf");
+        writeFileSync(modelFile, "live model bytes");
+        const snapModel = snapshotEnv(["SESSION_SEARCH_MODEL_PATH"]);
+        process.env.SESSION_SEARCH_MODEL_PATH = modelFile;
+        try {
+          saveIndex(fixtureVectors, fixtureChunks, fixtureDims);
+          const loadedOmit = loadIndex();
+          check(
+            "saveIndex omitted model defaults meta.model to modelName",
+            loadedOmit !== null && loadedOmit.meta.model === modelName,
+            loadedOmit ? `got=${JSON.stringify(loadedOmit.meta.model)} want=${JSON.stringify(modelName)}` : "no load"
+          );
+        } finally {
+          restoreEnv(snapModel);
+          try { rmSync(tmpModel, { recursive: true, force: true }); } catch {}
+        }
+      }
     } catch (unexpected) {
       check("save/lock block unexpected error", false, String((unexpected && unexpected.message) || unexpected));
     }
@@ -831,18 +865,74 @@ function restoreEnv(snap) {
   }
 }
 
+// ---------------------------------------------------------------- sweepStaleTempFiles (isolated via temp index dir + INDEX_* env)
+{
+  const tmpSweep = mkdtempSync(join(tmpdir(), "ss-unit-sweep-"));
+  const sBin = join(tmpSweep, "index.bin");
+  const sMeta = join(tmpSweep, "index.meta.json");
+  const snapSweep = snapshotEnv(["SESSION_SEARCH_INDEX_BIN", "SESSION_SEARCH_INDEX_META"]);
+  process.env.SESSION_SEARCH_INDEX_BIN = sBin;
+  process.env.SESSION_SEARCH_INDEX_META = sMeta;
+  const staleBin = join(tmpSweep, "index.bin.tmp-aaa11111");
+  const staleMeta = join(tmpSweep, "index.meta.json.tmp-bbb22222");
+  const freshBin = join(tmpSweep, "index.bin.tmp-fresh333");
+  const keepFile = join(tmpSweep, "keep-me.txt");
+  writeFileSync(staleBin, "stale bin tmp");
+  writeFileSync(staleMeta, "stale meta tmp");
+  writeFileSync(freshBin, "fresh tmp");
+  writeFileSync(keepFile, "not a tmp file");
+  const old = new Date(Date.now() - 3 * 60 * 60 * 1000);
+  utimesSync(staleBin, old, old);
+  utimesSync(staleMeta, old, old);
+  utimesSync(keepFile, old, old);
+  try {
+    const swept = sweepStaleTempFiles();
+    check("sweepStaleTempFiles returns count 2", swept === 2, `got=${swept}`);
+    check("sweepStaleTempFiles removes stale tmps", !existsSync(staleBin) && !existsSync(staleMeta));
+    check("sweepStaleTempFiles keeps fresh tmp", existsSync(freshBin));
+    check("sweepStaleTempFiles leaves non-tmp untouched", existsSync(keepFile));
+  } finally {
+    restoreEnv(snapSweep);
+    try { rmSync(tmpSweep, { recursive: true, force: true }); } catch {}
+  }
+}
+{
+  const tmpSweep = mkdtempSync(join(tmpdir(), "ss-unit-sweep-miss-"));
+  const missingDir = join(tmpSweep, "no-such-dir");
+  const snapSweep = snapshotEnv(["SESSION_SEARCH_INDEX_BIN", "SESSION_SEARCH_INDEX_META"]);
+  process.env.SESSION_SEARCH_INDEX_BIN = join(missingDir, "index.bin");
+  process.env.SESSION_SEARCH_INDEX_META = join(missingDir, "index.meta.json");
+  try {
+    check("sweepStaleTempFiles missing dir → 0", sweepStaleTempFiles() === 0);
+  } finally {
+    restoreEnv(snapSweep);
+    try { rmSync(tmpSweep, { recursive: true, force: true }); } catch {}
+  }
+}
+
 // ---------------------------------------------------------------- modelFileIdentity (isolated via temp file + MODEL_PATH env)
 {
   const tmpModel = mkdtempSync(join(tmpdir(), "ss-unit-ident-"));
   const modelFile = join(tmpModel, "fake-model.gguf");
-  writeFileSync(modelFile, "fake model bytes for identity testing");
-  const st = statSync(modelFile);
-  const expected = `${st.size}:${Math.floor(st.mtimeMs)}`;
   const snap = snapshotEnv(["SESSION_SEARCH_MODEL_PATH"]);
   process.env.SESSION_SEARCH_MODEL_PATH = modelFile;
   try {
-    const got = modelFileIdentity();
-    check("modelFileIdentity matches size:mtime via statSync", got === expected, `got=${got} want=${expected}`);
+    writeFileSync(modelFile, "x");
+    const idSmall = modelFileIdentity();
+    writeFileSync(modelFile, "x".repeat(100));
+    const idBig = modelFileIdentity();
+    check("modelFileIdentity differs when size differs", idSmall !== idBig, `small=${idSmall} big=${idBig}`);
+    const t0 = new Date(1700000000000);
+    writeFileSync(modelFile, "fixed content here");
+    utimesSync(modelFile, t0, t0);
+    const id0 = modelFileIdentity();
+    writeFileSync(modelFile, "fixed content here");
+    utimesSync(modelFile, t0, t0);
+    const idSame = modelFileIdentity();
+    check("modelFileIdentity same when size+mtime same", idSame === id0, `id0=${id0} same=${idSame}`);
+    utimesSync(modelFile, t0, new Date(1700000000000 + 10000));
+    const idBumped = modelFileIdentity();
+    check("modelFileIdentity differs when mtime differs", idBumped !== id0, `id0=${id0} bumped=${idBumped}`);
   } finally {
     restoreEnv(snap);
     try { rmSync(tmpModel, { recursive: true, force: true }); } catch {}
