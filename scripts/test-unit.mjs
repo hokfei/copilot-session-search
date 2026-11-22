@@ -1,6 +1,6 @@
 import { searchVectors } from "../lib/search.mjs";
-import { saveIndex, loadIndex, assertSafeToPublish, modelFileIdentity, shouldFullReembed, partialWarningSuffix, formatDoneLine } from "../lib/store.mjs";
-import { readAllDocsWithFailures, readAllDocs } from "../lib/read.mjs";
+import { saveIndex, loadIndex, assertSafeToPublish, modelFileIdentity, shouldFullReembed, partialWarningSuffix, formatDoneLine, hasMixedDims } from "../lib/store.mjs";
+import { readAllDocsWithFailures } from "../lib/read.mjs";
 import { extRoot, indexBinPath, indexMetaPath } from "../lib/paths.mjs";
 import {
   existsSync,
@@ -211,7 +211,6 @@ function restoreEnv(snap) {
     `message=${JSON.stringify(msg)}`
   );
 }
-// Red basis (code-evident): pre-fix signature had no defaults, so () threw TypeError.
 {
   let msg = "";
   let threw = false;
@@ -230,15 +229,14 @@ function restoreEnv(snap) {
   );
 }
 
-// ---------------------------------------------------------------- R3 pure helpers (shouldFullReembed/partialWarningSuffix/formatDoneLine)
-// Red basis (code-evident): helpers did not exist pre-R3; build-index had inline logic.
+// ---------------------------------------------------------------- R3 pure helpers (shouldFullReembed/partialWarningSuffix/formatDoneLine/hasMixedDims)
 {
   check("shouldFullReembed null oldMeta → false", shouldFullReembed(null, "10:20") === false);
 }
 {
   check(
-    "shouldFullReembed legacy undefined identity → false",
-    shouldFullReembed({ modelIdentity: undefined }, "10:20") === false
+    "shouldFullReembed legacy undefined identity → true",
+    shouldFullReembed({ modelIdentity: undefined }, "10:20") === true
   );
 }
 {
@@ -272,107 +270,68 @@ function restoreEnv(snap) {
   );
 }
 {
-  check("partialWarningSuffix 0 → empty", partialWarningSuffix(0) === "");
+  check("hasMixedDims uniform → false", hasMixedDims([[1, 2], [3, 4]]) === false);
 }
 {
+  check("hasMixedDims mixed → true", hasMixedDims([[1, 2], [3, 4, 5]]) === true);
+}
+{
+  check("hasMixedDims empty → false", hasMixedDims([]) === false);
+}
+{
+  check("partialWarningSuffix [] → empty", partialWarningSuffix([]) === "");
+}
+{
+  const failures = [{ source: "/tmp/dir/events.jsonl", reason: "1 malformed line skipped" }];
   check(
-    "partialWarningSuffix 2 → WARNING suffix",
-    partialWarningSuffix(2) === " (WARNING: partial index, 2 source problems — see log above)",
-    `got=${JSON.stringify(partialWarningSuffix(2))}`
+    "partialWarningSuffix 1 → singular inline",
+    partialWarningSuffix(failures) === " (WARNING: partial index, 1 source problem: events.jsonl: 1 malformed line skipped)",
+    `got=${JSON.stringify(partialWarningSuffix(failures))}`
+  );
+}
+{
+  const failures = [
+    { source: "/a/one.db", reason: "unopenable: boom" },
+    { source: "/b/two.db", reason: "unreadable: nope" },
+  ];
+  check(
+    "partialWarningSuffix 2 → plural inline",
+    partialWarningSuffix(failures) === " (WARNING: partial index, 2 source problems: one.db: unopenable: boom; two.db: unreadable: nope)",
+    `got=${JSON.stringify(partialWarningSuffix(failures))}`
+  );
+}
+{
+  const longReason = "0123456789".repeat(15);
+  const failures = [
+    { source: "/tmp/aaa.db", reason: longReason },
+    { source: "/tmp/bbb.db", reason: "short reason one" },
+    { source: "/tmp/ccc.db", reason: "short reason two" },
+    { source: "/tmp/ddd.db", reason: "short reason three (hidden)" },
+  ];
+  const shown0 = "aaa.db: 01234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901";
+  check(
+    "partialWarningSuffix 4 → first-3 + 100-char + more",
+    partialWarningSuffix(failures) === ` (WARNING: partial index, 4 source problems: ${shown0}; bbb.db: short reason one; ccc.db: short reason two; +1 more)`,
+    `got=${JSON.stringify(partialWarningSuffix(failures))}`
   );
 }
 {
   check(
-    "partialWarningSuffix 1 → WARNING suffix (plural pinned)",
-    partialWarningSuffix(1) === " (WARNING: partial index, 1 source problems — see log above)",
-    `got=${JSON.stringify(partialWarningSuffix(1))}`
+    "formatDoneLine [] → plain line",
+    formatDoneLine(10, 4, []) === "wrote index: 10 chunks, 4 dims",
+    `got=${JSON.stringify(formatDoneLine(10, 4, []))}`
   );
 }
 {
+  const failures = [{ source: "/tmp/x.db", reason: "boom" }];
   check(
-    "formatDoneLine 0 failures → plain line",
-    formatDoneLine(10, 4, 0) === "wrote index: 10 chunks, 4 dims",
-    `got=${JSON.stringify(formatDoneLine(10, 4, 0))}`
+    "formatDoneLine 1 failure → line + singular suffix",
+    formatDoneLine(10, 4, failures) === "wrote index: 10 chunks, 4 dims (WARNING: partial index, 1 source problem: x.db: boom)",
+    `got=${JSON.stringify(formatDoneLine(10, 4, failures))}`
   );
-}
-{
-  check(
-    "formatDoneLine 2 failures → line + suffix",
-    formatDoneLine(10, 4, 2) === "wrote index: 10 chunks, 4 dims (WARNING: partial index, 2 source problems — see log above)",
-    `got=${JSON.stringify(formatDoneLine(10, 4, 2))}`
-  );
-}
-
-// ---------------------------------------------------------------- read shapes (live local sources, shapes only, skip-on-unavailable)
-// R3 advisory: isolate from test env (clear overrides for true live) and skip if live DB locked/corrupt throws.
-{
-  const snapLive = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
-  delete process.env.SESSION_SEARCH_SESSION_STORE_DB;
-  delete process.env.SESSION_SEARCH_DATA_DB;
-  delete process.env.SESSION_SEARCH_STATE_DIR;
-  let res = null;
-  let threw = null;
-  try {
-    try {
-      res = readAllDocsWithFailures();
-    } catch (err) {
-      threw = err;
-    }
-    if (threw) {
-      check("readAllDocsWithFailures runs without throw", true, `SKIP live unavailable: ${threw.message}`);
-      check("readAllDocsWithFailures returns docs array", true, "SKIP live unavailable");
-      check("readAllDocsWithFailures returns failures array", true, "SKIP live unavailable");
-      check("readAllDocsWithFailures every failure has string source+reason", true, "SKIP live unavailable");
-      check("readAllDocsWithFailures docs have string sessionId+text", true, "SKIP live unavailable");
-    } else {
-      check("readAllDocsWithFailures runs without throw", true);
-      const docs = res.docs;
-      const fails = res.failures;
-      check("readAllDocsWithFailures returns docs array", Array.isArray(docs));
-      check("readAllDocsWithFailures returns failures array", Array.isArray(fails));
-      check(
-        "readAllDocsWithFailures every failure has string source+reason",
-        Array.isArray(fails) && fails.every((f) => typeof f.source === "string" && typeof f.reason === "string"),
-        `failures=${fails.length}`
-      );
-      check(
-        "readAllDocsWithFailures docs have string sessionId+text",
-        Array.isArray(docs) && docs.every((d) => typeof d.sessionId === "string" && typeof d.text === "string"),
-        `docs=${docs.length}`
-      );
-    }
-  } finally {
-    restoreEnv(snapLive);
-  }
-}
-{
-  const snapLive2 = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
-  delete process.env.SESSION_SEARCH_SESSION_STORE_DB;
-  delete process.env.SESSION_SEARCH_DATA_DB;
-  delete process.env.SESSION_SEARCH_STATE_DIR;
-  let docs = null;
-  let threw = null;
-  try {
-    try {
-      docs = readAllDocs();
-    } catch (err) {
-      threw = err;
-    }
-    if (threw) {
-      check("readAllDocs runs without throw", true, `SKIP live unavailable: ${threw.message}`);
-      check("readAllDocs returns plain docs array", true, "SKIP live unavailable");
-    } else {
-      check("readAllDocs runs without throw", true);
-      check("readAllDocs returns plain docs array", Array.isArray(docs));
-    }
-  } finally {
-    restoreEnv(snapLive2);
-  }
 }
 
 // ---------------------------------------------------------------- read fixtures (isolated via temp dirs + SESSION_* env)
-// Red basis for all isolated read tests (code-evident): SESSION_SEARCH_* overrides
-// did not exist pre-fix, so fixtures would have read live sources and counts would not match.
 {
   const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-ev-"));
   const stateDir = join(tmpRoot, "state");
@@ -403,7 +362,69 @@ function restoreEnv(snap) {
       "read fixture events: badLines entry has source+reason",
       res.failures.length === 1 &&
         res.failures[0].source === eventsPath &&
-        res.failures[0].reason === "1 malformed lines skipped",
+        res.failures[0].reason === "1 malformed line skipped",
+      `got=${JSON.stringify(res.failures)}`
+    );
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+{
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-tail-"));
+  const stateDir = join(tmpRoot, "state");
+  const sessDir = join(stateDir, "sess-tail1");
+  mkdirSync(sessDir, { recursive: true });
+  const eventsPath = join(sessDir, "events.jsonl");
+  const userText = "This is a sufficiently long user message for tail testing 12345";
+  const asstText = "This is a sufficiently long assistant reply for tail testing 67890";
+  const lines = [
+    JSON.stringify({ type: "user.message", id: "t1", data: { messageId: "t1", content: userText } }),
+    JSON.stringify({ type: "assistant.message", id: "t2", data: { messageId: "t2", content: asstText } }),
+    "{truncated tail no newline",
+  ];
+  writeFileSync(eventsPath, lines.join("\n"));
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = join(tmpRoot, "no-store.db");
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = stateDir;
+  try {
+    const res = readAllDocsWithFailures();
+    check("read fixture truncated tail: collects 2 docs", res.docs.length === 2, `got=${res.docs.length}`);
+    check("read fixture truncated tail: no failure", res.failures.length === 0, `got=${JSON.stringify(res.failures)}`);
+  } finally {
+    restoreEnv(snap);
+    try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
+  }
+}
+{
+  const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-midtail-"));
+  const stateDir = join(tmpRoot, "state");
+  const sessDir = join(stateDir, "sess-midtail");
+  mkdirSync(sessDir, { recursive: true });
+  const eventsPath = join(sessDir, "events.jsonl");
+  const userText = "This is a sufficiently long user message for midtail testing 12345";
+  const asstText = "This is a sufficiently long assistant reply for midtail testing 67890";
+  const lines = [
+    JSON.stringify({ type: "user.message", id: "m1", data: { messageId: "m1", content: userText } }),
+    "{mid bad line",
+    JSON.stringify({ type: "assistant.message", id: "m2", data: { messageId: "m2", content: asstText } }),
+    "{truncated tail",
+  ];
+  writeFileSync(eventsPath, lines.join("\n"));
+  const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
+  process.env.SESSION_SEARCH_SESSION_STORE_DB = join(tmpRoot, "no-store.db");
+  process.env.SESSION_SEARCH_DATA_DB = join(tmpRoot, "no-data.db");
+  process.env.SESSION_SEARCH_STATE_DIR = stateDir;
+  try {
+    const res = readAllDocsWithFailures();
+    check("read fixture mid+tail: collects 2 docs", res.docs.length === 2, `got=${res.docs.length}`);
+    check("read fixture mid+tail: 1 failure (mid counted)", res.failures.length === 1, `got=${JSON.stringify(res.failures)}`);
+    check(
+      "read fixture mid+tail: reason counts mid only",
+      res.failures.length === 1 &&
+        res.failures[0].source === eventsPath &&
+        res.failures[0].reason === "1 malformed line skipped",
       `got=${JSON.stringify(res.failures)}`
     );
   } finally {
@@ -471,7 +492,6 @@ function restoreEnv(snap) {
   }
 }
 {
-  // Red basis (code-evident): old readEventsDocs pushed unreadable failure for missing dir.
   const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-absent-"));
   const snap = snapshotEnv(["SESSION_SEARCH_SESSION_STORE_DB", "SESSION_SEARCH_DATA_DB", "SESSION_SEARCH_STATE_DIR"]);
   process.env.SESSION_SEARCH_SESSION_STORE_DB = join(tmpRoot, "no-store.db");
@@ -509,7 +529,6 @@ function restoreEnv(snap) {
     try { rmSync(tmpRoot, { recursive: true, force: true }); } catch {}
   }
 }
-// Red basis (safe targeted check): ENOTDIR on readdirSync(file) must surface as unreadable; fails if catch removed.
 {
   const tmpRoot = mkdtempSync(join(tmpdir(), "ss-unit-read-filestate-"));
   const fileAsState = join(tmpRoot, "file-as-state");
@@ -542,10 +561,7 @@ function restoreEnv(snap) {
   process.env.SESSION_SEARCH_INDEX_BIN = tBin;
   process.env.SESSION_SEARCH_INDEX_META = tMeta;
   process.env.SESSION_SEARCH_INDEX_LOCK = tLock;
-  // Shadow real paths so test-local file checks also hit temp.
-  const indexBinPath = tBin;
-  const indexMetaPath = tMeta;
-  const indexLockPath = tLock;
+  // Temp paths used directly (tBin/tMeta/tLock); no shadowing.
 
   const fixtureDims = 4;
   const fixtureChunks = [
@@ -607,7 +623,6 @@ function restoreEnv(snap) {
           `message=${JSON.stringify(err.message)}`
         );
       }
-      // Red basis (prior demo): red-f5.mjs showed F5 TypeError for 2 vectors/3 chunks.
       try {
         saveIndex(
           [
@@ -628,7 +643,6 @@ function restoreEnv(snap) {
           `message=${JSON.stringify(err.message)}`
         );
       }
-      // Red basis (code-evident): old loop did vectors[i].length without null check, so TypeError.
       try {
         saveIndex(
           [
@@ -655,7 +669,7 @@ function restoreEnv(snap) {
         roundTripErr = err;
       }
       check("saveIndex valid tiny index saves without throw", roundTripErr === null, roundTripErr ? roundTripErr.message : "");
-      check("saveIndex releases lock (index.lock absent after save)", !existsSync(indexLockPath));
+      check("saveIndex releases lock (index.lock absent after save)", !existsSync(tLock));
       let loaded = null;
       let loadErr = null;
       try {
@@ -689,7 +703,7 @@ function restoreEnv(snap) {
         loaded ? `got=${JSON.stringify(loaded.meta.binSha1)}` : "no load"
       );
       if (loaded !== null) {
-        const recomputed = sha1Of(readFileSync(indexBinPath));
+        const recomputed = sha1Of(readFileSync(tBin));
         check(
           "saveIndex round-trip binSha1 matches file bytes",
           recomputed === loaded.meta.binSha1,
@@ -700,10 +714,10 @@ function restoreEnv(snap) {
       }
 
       // -- tamper detection
-      const goodBin = readFileSync(indexBinPath);
+      const goodBin = readFileSync(tBin);
       const tampered = Buffer.from(goodBin);
       tampered[0] = tampered[0] ^ 0xff;
-      writeFileSync(indexBinPath, tampered);
+      writeFileSync(tBin, tampered);
       try {
         loadIndex();
         check("loadIndex throws /disagree/ on tampered bin", false, "did not throw");
@@ -718,9 +732,9 @@ function restoreEnv(snap) {
       saveIndex(fixtureVectors, fixtureChunks, fixtureDims);
 
       // -- fresh lock blocks
-      const beforeBinSha = sha1Of(readFileSync(indexBinPath));
-      const beforeMetaSha = sha1Of(readFileSync(indexMetaPath));
-      writeFileSync(indexLockPath, `test fresh ${Date.now()}\n`);
+      const beforeBinSha = sha1Of(readFileSync(tBin));
+      const beforeMetaSha = sha1Of(readFileSync(tMeta));
+      writeFileSync(tLock, `test fresh ${Date.now()}\n`);
       try {
         try {
           saveIndex(fixtureVectors, fixtureChunks, fixtureDims);
@@ -728,12 +742,12 @@ function restoreEnv(snap) {
         } catch (err) {
           check(
             "fresh lock blocks saveIndex",
-            /another index build is in progress/.test(err.message),
+            /another index publish is in progress/.test(err.message),
             `message=${JSON.stringify(err.message)}`
           );
         }
-        const afterBinSha = sha1Of(readFileSync(indexBinPath));
-        const afterMetaSha = sha1Of(readFileSync(indexMetaPath));
+        const afterBinSha = sha1Of(readFileSync(tBin));
+        const afterMetaSha = sha1Of(readFileSync(tMeta));
         check(
           "fresh lock leaves index untouched",
           beforeBinSha === afterBinSha && beforeMetaSha === afterMetaSha,
@@ -741,16 +755,16 @@ function restoreEnv(snap) {
         );
       } finally {
         try {
-          unlinkSync(indexLockPath);
+          unlinkSync(tLock);
         } catch {
           // Already gone.
         }
       }
 
       // -- stale lock stolen
-      writeFileSync(indexLockPath, "test stale\n");
+      writeFileSync(tLock, "test stale\n");
       const threeHoursAgo = new Date(Date.now() - 3 * 60 * 60 * 1000);
-      utimesSync(indexLockPath, threeHoursAgo, threeHoursAgo);
+      utimesSync(tLock, threeHoursAgo, threeHoursAgo);
       try {
         let staleErr = null;
         try {
@@ -763,7 +777,7 @@ function restoreEnv(snap) {
           staleErr === null,
           staleErr ? staleErr.message : ""
         );
-        check("stale lock stolen: lock released", !existsSync(indexLockPath));
+        check("stale lock stolen: lock released", !existsSync(tLock));
         let staleLoadOk = false;
         try {
           const reloaded = loadIndex();
@@ -775,20 +789,18 @@ function restoreEnv(snap) {
         check("stale lock stolen: index contains new save", staleLoadOk);
       } finally {
         try {
-          unlinkSync(indexLockPath);
+          unlinkSync(tLock);
         } catch {
           // Already gone.
         }
       }
 
-      // Red basis (code-evident): INDEX_* env did not exist pre-fix, so temp files would not exist.
       check(
         "saveIndex writes to temp paths via INDEX_* overrides",
-        existsSync(indexBinPath) && existsSync(indexMetaPath),
-        `bin=${existsSync(indexBinPath)} meta=${existsSync(indexMetaPath)}`
+        existsSync(tBin) && existsSync(tMeta),
+        `bin=${existsSync(tBin)} meta=${existsSync(tMeta)}`
       );
 
-      // Red basis (code-evident): modelFileIdentity/meta.modelIdentity did not exist pre-fix.
       {
         const tmpModel = mkdtempSync(join(tmpdir(), "ss-unit-model-"));
         const modelFile = join(tmpModel, "fake-model.gguf");
@@ -820,7 +832,6 @@ function restoreEnv(snap) {
 }
 
 // ---------------------------------------------------------------- modelFileIdentity (isolated via temp file + MODEL_PATH env)
-// Red basis (code-evident): modelFileIdentity did not exist pre-fix.
 {
   const tmpModel = mkdtempSync(join(tmpdir(), "ss-unit-ident-"));
   const modelFile = join(tmpModel, "fake-model.gguf");
@@ -853,10 +864,18 @@ function restoreEnv(snap) {
 
 // Safety: real index must be unchanged (temp isolation, no backup/restore).
 {
-  const curBinSha = existsSync(indexBinPath) ? sha1Of(readFileSync(indexBinPath)) : null;
-  const curMetaSha = existsSync(indexMetaPath) ? sha1Of(readFileSync(indexMetaPath)) : null;
-  check("safety: real index.bin unchanged (temp isolation)", curBinSha === realBinSha0);
-  check("safety: real index.meta.json unchanged (temp isolation)", curMetaSha === realMetaSha0);
+  if (realBinSha0 === null) {
+    console.log("SKIP safety: no real index.bin exists");
+  } else {
+    const curBinSha = existsSync(indexBinPath) ? sha1Of(readFileSync(indexBinPath)) : "<missing>";
+    check("safety: real index.bin unchanged (temp isolation)", curBinSha === realBinSha0);
+  }
+  if (realMetaSha0 === null) {
+    console.log("SKIP safety: no real index.meta.json exists");
+  } else {
+    const curMetaSha = existsSync(indexMetaPath) ? sha1Of(readFileSync(indexMetaPath)) : "<missing>";
+    check("safety: real index.meta.json unchanged (temp isolation)", curMetaSha === realMetaSha0);
+  }
 }
 
 if (failures.length > 0) {

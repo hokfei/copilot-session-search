@@ -3,7 +3,7 @@ import { extRoot, modelName } from "../lib/paths.mjs";
 import { readAllDocsWithFailures } from "../lib/read.mjs";
 import { chunkText, chunkKey, sha1 } from "../lib/chunk.mjs";
 import { embedDocuments, disposeEmbedder } from "../lib/embed.mjs";
-import { loadIndex, saveIndex, assertSafeToPublish, modelFileIdentity, resolveIndexPaths, shouldFullReembed, formatDoneLine, partialWarningSuffix } from "../lib/store.mjs";
+import { loadIndex, saveIndex, assertSafeToPublish, modelFileIdentity, resolveIndexPaths, shouldFullReembed, hasMixedDims, formatDoneLine, partialWarningSuffix } from "../lib/store.mjs";
 
 function buildChunks(docs) {
   const chunks = [];
@@ -80,7 +80,7 @@ async function main() {
       return prev && prev.hash === c.hash;
     });
   if (unchanged) {
-    console.log(`nothing changed, index untouched${partialWarningSuffix(failures.length)}`);
+    console.log(`nothing changed, index untouched${partialWarningSuffix(failures)}`);
     return;
   }
 
@@ -114,7 +114,7 @@ async function main() {
   // Reused vectors can disagree with fresh ones when the model file was
   // swapped under the same name (the basename check above can't see that).
   // Uniformity is the real signal: mixed rows mean the model changed.
-  if (new Set(vectors.map((v) => v.length)).size > 1) {
+  if (hasMixedDims(vectors)) {
     console.log(
       "dims disagreement between reused and fresh vectors, full re-embed"
     );
@@ -130,7 +130,7 @@ async function main() {
 
   const dims = vectors[0].length;
   saveIndex(vectors, chunks, dims);
-  console.log(formatDoneLine(chunks.length, dims, failures.length));
+  console.log(formatDoneLine(chunks.length, dims, failures));
 }
 
 main().catch((err) => {

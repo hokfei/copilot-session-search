@@ -11,7 +11,7 @@ session stores ──read──▶ docs ──chunk──▶ embed each ──�
 (read-only)        (1500 chars,   (Qwen3-Embedding-0.6B,
                     200 overlap)   1024 dims, local GGUF)
 
-query ──embed──▶ dot product over all vectors ──▶ top limit*4 ──▶ max 2 per session
+query ──embed──▶ dot product over all vectors ──▶ full ranked list ──▶ 2 per session, then fill to limit (soft cap)
 ```
 
 Sources read (all read-only, rows under 40 chars skipped):
@@ -78,11 +78,13 @@ npm run build
 ## Tests
 
 ```bash
-npm test
+npm test            # live self-consistency checks (needs the model + index)
+npm run test:unit   # offline fixture tests, no model needed
 ```
 
-Runs generic self-consistency checks against your own index (result shape,
-score ordering, per-session cap, limit clamp, chunk round-trip).
+`npm test` runs generic self-consistency checks against your own index
+(result shape, score ordering, soft per-session cap, limit clamp, chunk
+round-trip).
 
 ## Layout
 
@@ -93,13 +95,15 @@ lib/read.mjs           read-only session store readers
 lib/chunk.mjs          sliding-window chunking + keying/hashing
 lib/embed.mjs          local embedding (lazy-loaded, L2-normalized)
 lib/store.mjs          Float32 bin + JSON meta persistence
-lib/search.mjs         brute-force dot-product search + per-session cap
+lib/search.mjs         brute-force dot-product search + soft per-session cap
 scripts/build-index.mjs    incremental index builder
 scripts/test-search.mjs    self-consistency tests
+scripts/test-unit.mjs      offline fixture tests
 scripts/daily-reindex.mjs  once-an-hour guard + rebuild
 scripts/schedule-daily.mjs OS scheduler registration
 index.bin              vectors (generated, gitignored)
 index.meta.json        chunk metadata (generated, gitignored)
+index.lock             publish lock (transient, gitignored)
 ```
 
 ## License
