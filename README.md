@@ -83,8 +83,9 @@ npm run test:unit   # offline fixture tests, no model needed
 ```
 
 `npm test` runs generic self-consistency checks against your own index
-(result shape, score ordering, soft per-session cap, limit clamp, chunk
-round-trip).
+(result shape, score ordering, fill to limit, limit clamp, chunk
+round-trip); per-session diversity is pinned by the starvation fixture in
+`npm run test:unit`.
 
 ## Layout
 
